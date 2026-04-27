@@ -1,4 +1,5 @@
-﻿#define TRANSPORT_EXPORTS
+#include "pch.h"
+#define TRANSPORT_EXPORTS
 #include "SRMapPaisev.h"
 
 #include <boost/asio.hpp>
@@ -8,6 +9,37 @@ using boost::asio::ip::tcp;
 
 namespace
 {
+    std::string WideToUtf8(const std::wstring& value)
+    {
+        if (value.empty())
+            return std::string();
+
+        int requiredSize = WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            value.c_str(),
+            static_cast<int>(value.size()),
+            nullptr,
+            0,
+            nullptr,
+            nullptr);
+
+        if (requiredSize <= 0)
+            return std::string();
+
+        std::string result(static_cast<std::size_t>(requiredSize), '\0');
+        WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            value.c_str(),
+            static_cast<int>(value.size()),
+            &result[0],
+            requiredSize,
+            nullptr,
+            nullptr);
+        return result;
+    }
+
     bool ReadExact(tcp::socket& socket, void* data, std::size_t size)
     {
         boost::system::error_code ec;
@@ -40,7 +72,10 @@ SRMapPaisev::SRMapPaisev(
     socket = std::make_shared<tcp::socket>(*ioContext);
     tcp::resolver resolver(*ioContext);
 
-    std::string hostNarrow(host.begin(), host.end());
+    std::string hostNarrow = WideToUtf8(host);
+    if (hostNarrow.empty())
+        hostNarrow = "127.0.0.1";
+
     auto endpoints = resolver.resolve(hostNarrow, std::to_string(port));
     boost::asio::connect(*socket, endpoints);
 
