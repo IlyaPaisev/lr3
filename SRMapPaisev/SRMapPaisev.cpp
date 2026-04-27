@@ -1,12 +1,7 @@
-﻿#define TRANSPORT_EXPORTS
-#include "SRMapPaisev.h"
+#define TRANSPORT_EXPORTS
 #include "pch.h"
+#include "SRMapPaisev.h"
 
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0601
-#endif
-
-#include <windows.h>
 #include <boost/asio.hpp>
 #include <vector>
 
@@ -18,8 +13,31 @@ namespace
     {
         if (value.empty())
             return std::string();
-        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-        return converter.to_bytes(value);
+
+        int requiredSize = WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            value.c_str(),
+            static_cast<int>(value.size()),
+            nullptr,
+            0,
+            nullptr,
+            nullptr);
+
+        if (requiredSize <= 0)
+            return std::string();
+
+        std::string result(static_cast<std::size_t>(requiredSize), '\0');
+        WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            value.c_str(),
+            static_cast<int>(value.size()),
+            &result[0],
+            requiredSize,
+            nullptr,
+            nullptr);
+        return result;
     }
 
     bool ReadExact(tcp::socket& socket, void* data, std::size_t size)
