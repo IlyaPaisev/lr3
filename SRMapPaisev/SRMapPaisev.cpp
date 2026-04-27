@@ -1,13 +1,13 @@
 ﻿#define TRANSPORT_EXPORTS
 #include "SRMapPaisev.h"
+#include "pch.h"
 
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601
 #endif
 
+#include <windows.h>
 #include <boost/asio.hpp>
-#include <codecvt>
-#include <locale>
 #include <vector>
 
 using boost::asio::ip::tcp;
@@ -18,8 +18,14 @@ namespace
     {
         if (value.empty())
             return std::string();
-        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-        return converter.to_bytes(value);
+
+        int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+        if (required <= 0)
+            return std::string();
+
+        std::string result(static_cast<std::size_t>(required), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), &result[0], required, nullptr, nullptr);
+        return result;
     }
 
     bool ReadExact(tcp::socket& socket, void* data, std::size_t size)
@@ -43,8 +49,8 @@ SRMapPaisev::SRMapPaisev(
     const wchar_t*,
     const wchar_t*)
     : host(hostName ? hostName : L"127.0.0.1"),
-      port(portName ? _wtoi(portName) : 54000),
-      running(true)
+    port(portName ? _wtoi(portName) : 54000),
+    running(true)
 {
     if (port <= 0)
         port = 54000;
