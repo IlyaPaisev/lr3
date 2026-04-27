@@ -6,6 +6,9 @@
 #include <thread>
 #include <memory>
 #include <atomic>
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
 #include <boost/asio.hpp>
 #include "MessagePaisev.h"
 
@@ -15,7 +18,7 @@
 #define SRMAP_API __declspec(dllimport)
 #endif
 
-class SRMAP_API SRMapPaisev : public ISenderPaisev, public IReceiverPaisev
+class SRMapPaisev : public ISenderPaisev, public IReceiverPaisev
 {
 private:
     std::wstring host;
