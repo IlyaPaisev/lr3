@@ -11,6 +11,10 @@
 #include <algorithm>
 #include <atomic>
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+
 #include <boost/asio.hpp>
 
 #include "MessagePaisev.h"
@@ -286,6 +290,11 @@ namespace
             {
                 SendConfirmation(*socket, incoming.header.to, true, L"Клиент отключен от сервера.");
                 return;
+            }
+            case MT_REFRESH_THREADS:
+            {
+                SendConfirmation(*socket, TARGET_MAIN_THREAD, true, BuildActiveIdsCsv(), ActiveWorkersCount());
+                break;
             }
             case MT_SHUTDOWN:
             {
