@@ -14,7 +14,7 @@
 #include <boost/asio.hpp>
 #include "MessagePaisev.h"
 
-#ifdef TRANSPORT_EXPORTS
+#if defined(TRANSPORT_EXPORTS) || defined(SRMAPPAISEV_EXPORTS)
 #define SRMAP_API __declspec(dllexport)
 #else
 #define SRMAP_API __declspec(dllimport)

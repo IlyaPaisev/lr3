@@ -1,5 +1,5 @@
-#define TRANSPORT_EXPORTS
 #include "pch.h"
+#define TRANSPORT_EXPORTS
 #include "SRMapPaisev.h"
 
 #include <boost/asio.hpp>
