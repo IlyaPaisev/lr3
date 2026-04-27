@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <string>
 
 enum MessageTypesPaisev
@@ -35,8 +35,8 @@ struct MessagePaisev
     std::wstring data;
 
     MessagePaisev() = default;
-    MessagePaisev(MessageTypesPaisev messageType, const std::wstring& data = L"");
-    MessagePaisev(int to, MessageTypesPaisev messageType, const std::wstring& data, int status = 0, int auxId = 0);
+    MessagePaisev(MessageTypesPaisev messageType, const std::wstring& text = L"");
+    MessagePaisev(int toValue, MessageTypesPaisev messageType, const std::wstring& text, int statusValue = 0, int auxIdValue = 0);
 
     void refreshSize();
 

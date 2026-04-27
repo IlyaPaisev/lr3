@@ -1,5 +1,5 @@
-﻿#include "MessagePaisev.h"
 #include "pch.h"
+#include "MessagePaisev.h"
 
 MessagePaisev::MessagePaisev(MessageTypesPaisev messageType, const std::wstring& text)
     : data(text)
