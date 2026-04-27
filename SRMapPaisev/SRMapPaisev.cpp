@@ -1,6 +1,12 @@
 ﻿#define TRANSPORT_EXPORTS
 #include "SRMapPaisev.h"
+#include "pch.h"
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+
+#include <windows.h>
 #include <boost/asio.hpp>
 #include <vector>
 
@@ -8,6 +14,20 @@ using boost::asio::ip::tcp;
 
 namespace
 {
+    std::string WideToUtf8(const std::wstring& value)
+    {
+        if (value.empty())
+            return std::string();
+
+        int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+        if (required <= 0)
+            return std::string();
+
+        std::string result(static_cast<std::size_t>(required), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), &result[0], required, nullptr, nullptr);
+        return result;
+    }
+
     bool ReadExact(tcp::socket& socket, void* data, std::size_t size)
     {
         boost::system::error_code ec;
@@ -29,8 +49,8 @@ SRMapPaisev::SRMapPaisev(
     const wchar_t*,
     const wchar_t*)
     : host(hostName ? hostName : L"127.0.0.1"),
-      port(portName ? _wtoi(portName) : 54000),
-      running(true)
+    port(portName ? _wtoi(portName) : 54000),
+    running(true)
 {
     if (port <= 0)
         port = 54000;
@@ -40,7 +60,9 @@ SRMapPaisev::SRMapPaisev(
     socket = std::make_shared<tcp::socket>(*ioContext);
     tcp::resolver resolver(*ioContext);
 
-    std::string hostNarrow(host.begin(), host.end());
+    std::string hostNarrow = WideToUtf8(host);
+    if (hostNarrow.empty())
+        hostNarrow = "127.0.0.1";
     auto endpoints = resolver.resolve(hostNarrow, std::to_string(port));
     boost::asio::connect(*socket, endpoints);
 

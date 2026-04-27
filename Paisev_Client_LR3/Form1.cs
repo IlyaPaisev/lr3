@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
@@ -90,7 +91,36 @@ namespace Paisev_Client_LR3
 
         private bool InitMap()
         {
-            mapPtr = CreateSRMapPaisev(SERVER_HOST, SERVER_PORT, "", "");
+            try
+            {
+                mapPtr = CreateSRMapPaisev(SERVER_HOST, SERVER_PORT, "", "");
+            }
+            catch (DllNotFoundException ex)
+            {
+                MessageBox.Show("Не найден SRMapPaisev.dll рядом с клиентом.\nПроверьте копирование DLL в папку с Paisev_Client_LR3.exe.\n\n" + ex.Message, "Ошибка загрузки DLL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (BadImageFormatException ex)
+            {
+                MessageBox.Show("Несовместимая разрядность клиента и SRMapPaisev.dll (x86/x64).\nСоберите клиент и DLL в одной платформе (обычно x64).\n\n" + ex.Message, "Ошибка разрядности", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (EntryPointNotFoundException ex)
+            {
+                MessageBox.Show("В SRMapPaisev.dll не найдена функция CreateSRMapPaisev.\nПроверьте, что подключена актуальная версия DLL.\n\n" + ex.Message, "Ошибка точки входа", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (Win32Exception ex)
+            {
+                MessageBox.Show("Не удалось загрузить нативные зависимости SRMapPaisev.dll (например, VC++ Runtime).\n\n" + ex.Message, "Ошибка Win32", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (SEHException ex)
+            {
+                MessageBox.Show("Низкоуровневая ошибка при вызове SRMapPaisev.dll.\nПроверьте зависимости Visual C++ Runtime и совместимость DLL.\n\n" + ex.Message, "SEH ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+
             if (mapPtr == IntPtr.Zero)
                 return false;
 
