@@ -291,6 +291,11 @@ namespace
                 SendConfirmation(*socket, incoming.header.to, true, L"Клиент отключен от сервера.");
                 return;
             }
+            case MT_REFRESH_THREADS:
+            {
+                SendConfirmation(*socket, TARGET_MAIN_THREAD, true, BuildActiveIdsCsv(), ActiveWorkersCount());
+                break;
+            }
             case MT_SHUTDOWN:
             {
                 SendConfirmation(*socket, incoming.header.to, false, L"Остановка сервера удалённо запрещена.");
