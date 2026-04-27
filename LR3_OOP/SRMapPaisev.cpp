@@ -1,13 +1,27 @@
 ﻿#define TRANSPORT_EXPORTS
 #include "SRMapPaisev.h"
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+
 #include <boost/asio.hpp>
+#include <codecvt>
+#include <locale>
 #include <vector>
 
 using boost::asio::ip::tcp;
 
 namespace
 {
+    std::string WideToUtf8(const std::wstring& value)
+    {
+        if (value.empty())
+            return std::string();
+        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+        return converter.to_bytes(value);
+    }
+
     bool ReadExact(tcp::socket& socket, void* data, std::size_t size)
     {
         boost::system::error_code ec;
@@ -40,7 +54,9 @@ SRMapPaisev::SRMapPaisev(
     socket = std::make_shared<tcp::socket>(*ioContext);
     tcp::resolver resolver(*ioContext);
 
-    std::string hostNarrow(host.begin(), host.end());
+    std::string hostNarrow = WideToUtf8(host);
+    if (hostNarrow.empty())
+        hostNarrow = "127.0.0.1";
     auto endpoints = resolver.resolve(hostNarrow, std::to_string(port));
     boost::asio::connect(*socket, endpoints);
 
