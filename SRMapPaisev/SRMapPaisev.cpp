@@ -1,10 +1,13 @@
-#define TRANSPORT_EXPORTS
-#include "pch.h"
+﻿#define TRANSPORT_EXPORTS
 #include "SRMapPaisev.h"
+#include "pch.h"
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+
+#include <windows.h>
 #include <boost/asio.hpp>
-#include <codecvt>
-#include <locale>
 #include <vector>
 
 using boost::asio::ip::tcp;
