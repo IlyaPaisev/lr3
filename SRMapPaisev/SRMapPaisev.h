@@ -27,17 +27,10 @@ private:
     int port;
 
     mutable std::mutex sendMutex;
-    mutable std::mutex queueMutex;
-    mutable std::condition_variable queueCv;
-    mutable std::queue<MessagePaisev> incoming;
+    mutable std::mutex receiveMutex;
 
     std::unique_ptr<boost::asio::io_context> ioContext;
     std::shared_ptr<boost::asio::ip::tcp::socket> socket;
-    std::unique_ptr<std::thread> readerThread;
-
-    std::atomic<bool> running;
-
-    void readerLoop();
 
 public:
     SRMapPaisev(const wchar_t* hostName, const wchar_t* portName, const wchar_t* unused1, const wchar_t* unused2);

@@ -10,6 +10,11 @@
 #include <string>
 #include <algorithm>
 #include <atomic>
+#include <stdexcept>
+
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
 
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601
@@ -77,6 +82,29 @@ namespace
 
         return true;
     }
+
+    class SocketSender final : public ISenderPaisev
+    {
+    public:
+        explicit SocketSender(tcp::socket& sock) : socket(sock) {}
+        void send(MessagePaisev& msg) const override { SendMessage(socket, msg); }
+        void sendConfirmation(MessagePaisev& msg) const override { SendMessage(socket, msg); }
+    private:
+        tcp::socket& socket;
+    };
+
+    class SocketReceiver final : public IReceiverPaisev
+    {
+    public:
+        explicit SocketReceiver(tcp::socket& sock) : socket(sock) {}
+        void receive(MessagePaisev& msg) const override
+        {
+            if (!ReceiveMessage(socket, msg))
+                throw std::runtime_error("client disconnected");
+        }
+    private:
+        tcp::socket& socket;
+    };
 
     void Log(const std::wstring& text)
     {
@@ -217,7 +245,8 @@ namespace
     void SendConfirmation(tcp::socket& socket, int to, bool ok, const std::wstring& text, int auxId = 0)
     {
         MessagePaisev response(to, MT_CONFIRM, text, ok ? 1 : 0, auxId);
-        SendMessage(socket, response);
+        SocketSender sender(socket);
+        response.sendConfirmation(sender);
     }
 
     void HandleClient(std::shared_ptr<tcp::socket> socket)
@@ -230,7 +259,12 @@ namespace
         while (g_running.load())
         {
             MessagePaisev incoming;
-            if (!ReceiveMessage(*socket, incoming))
+            try
+            {
+                SocketReceiver receiver(*socket);
+                incoming.receive(receiver);
+            }
+            catch (...)
                 break;
 
             std::lock_guard<std::mutex> lock(g_sessionsMutex);
