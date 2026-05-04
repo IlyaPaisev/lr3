@@ -8,7 +8,8 @@ enum MessageTypesPaisev
     MT_STOP_THREAD = 3,
     MT_SHUTDOWN = 4,
     MT_CONFIRM = 5,
-    MT_DISCONNECT = 6
+    MT_DISCONNECT = 6,
+    MT_REFRESH_THREADS = 7
 };
 
 enum TargetIdsPaisev

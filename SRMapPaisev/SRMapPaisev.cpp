@@ -1,4 +1,5 @@
-﻿#define TRANSPORT_EXPORTS
+#include "pch.h"
+#define TRANSPORT_EXPORTS
 #include "SRMapPaisev.h"
 
 #include <boost/asio.hpp>
@@ -8,6 +9,37 @@ using boost::asio::ip::tcp;
 
 namespace
 {
+    std::string WideToUtf8(const std::wstring& value)
+    {
+        if (value.empty())
+            return std::string();
+
+        int requiredSize = WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            value.c_str(),
+            static_cast<int>(value.size()),
+            nullptr,
+            0,
+            nullptr,
+            nullptr);
+
+        if (requiredSize <= 0)
+            return std::string();
+
+        std::string result(static_cast<std::size_t>(requiredSize), '\0');
+        WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            value.c_str(),
+            static_cast<int>(value.size()),
+            &result[0],
+            requiredSize,
+            nullptr,
+            nullptr);
+        return result;
+    }
+
     bool ReadExact(tcp::socket& socket, void* data, std::size_t size)
     {
         boost::system::error_code ec;
@@ -29,8 +61,7 @@ SRMapPaisev::SRMapPaisev(
     const wchar_t*,
     const wchar_t*)
     : host(hostName ? hostName : L"127.0.0.1"),
-      port(portName ? _wtoi(portName) : 54000),
-      running(true)
+      port(portName ? _wtoi(portName) : 54000)
 {
     if (port <= 0)
         port = 54000;
@@ -40,62 +71,23 @@ SRMapPaisev::SRMapPaisev(
     socket = std::make_shared<tcp::socket>(*ioContext);
     tcp::resolver resolver(*ioContext);
 
-    std::string hostNarrow(host.begin(), host.end());
+    std::string hostNarrow = WideToUtf8(host);
+    if (hostNarrow.empty())
+        hostNarrow = "127.0.0.1";
+
     auto endpoints = resolver.resolve(hostNarrow, std::to_string(port));
     boost::asio::connect(*socket, endpoints);
 
-    readerThread = std::make_unique<std::thread>(&SRMapPaisev::readerLoop, this);
 }
 
 SRMapPaisev::~SRMapPaisev()
 {
-    running.store(false);
-
     if (socket)
     {
         boost::system::error_code ignored;
         socket->shutdown(tcp::socket::shutdown_both, ignored);
         socket->close(ignored);
     }
-
-    queueCv.notify_all();
-
-    if (readerThread && readerThread->joinable())
-        readerThread->join();
-}
-
-void SRMapPaisev::readerLoop()
-{
-    if (!socket)
-        return;
-
-    while (running.load())
-    {
-        MessageHeaderPaisev header{};
-        if (!ReadExact(*socket, &header, sizeof(header)))
-            break;
-
-        std::wstring text;
-        if (header.size > 0)
-        {
-            text.resize(header.size / static_cast<int>(sizeof(wchar_t)));
-            if (!text.empty() && !ReadExact(*socket, &text[0], static_cast<std::size_t>(header.size)))
-                break;
-        }
-
-        MessagePaisev msg;
-        msg.header = header;
-        msg.data = text;
-
-        {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            incoming.push(msg);
-        }
-        queueCv.notify_all();
-    }
-
-    running.store(false);
-    queueCv.notify_all();
 }
 
 void SRMapPaisev::send(MessagePaisev& msg) const
@@ -118,23 +110,39 @@ void SRMapPaisev::sendConfirmation(MessagePaisev& msg) const
 
 void SRMapPaisev::receive(MessagePaisev& msg) const
 {
-    std::unique_lock<std::mutex> lock(queueMutex);
-    queueCv.wait(lock, [this]() { return !incoming.empty() || !running.load(); });
-
-    if (incoming.empty())
+    if (!socket)
     {
         msg = MessagePaisev();
         return;
     }
 
-    msg = incoming.front();
-    incoming.pop();
+    std::lock_guard<std::mutex> lock(receiveMutex);
+
+    MessageHeaderPaisev header{};
+    if (!ReadExact(*socket, &header, sizeof(header)))
+    {
+        msg = MessagePaisev();
+        return;
+    }
+
+    std::wstring text;
+    if (header.size > 0)
+    {
+        text.resize(header.size / static_cast<int>(sizeof(wchar_t)));
+        if (!text.empty() && !ReadExact(*socket, &text[0], static_cast<std::size_t>(header.size)))
+        {
+            msg = MessagePaisev();
+            return;
+        }
+    }
+
+    msg.header = header;
+    msg.data = text;
 }
 
 void SRMapPaisev::waitForMessage() const
 {
-    std::unique_lock<std::mutex> lock(queueMutex);
-    queueCv.wait(lock, [this]() { return !incoming.empty() || !running.load(); });
+    // TCP receive is blocking in receive(); no separate local queue is used.
 }
 
 void SRMapPaisev::waitForProcessed() const

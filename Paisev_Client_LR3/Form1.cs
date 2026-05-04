@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
@@ -27,6 +28,7 @@ namespace Paisev_Client_LR3
         private const int MT_CREATE_THREAD = 2;
         private const int MT_STOP_THREAD = 3;
         private const int MT_DISCONNECT = 6;
+        private const int MT_REFRESH_THREADS = 7;
 
         private const int TARGET_ALL_THREADS = 0;
         private const int TARGET_MAIN_THREAD = -1;
@@ -36,6 +38,7 @@ namespace Paisev_Client_LR3
 
         private Button buttonStart;
         private Button buttonStop;
+        private Button buttonRefresh;
         private Button buttonSend;
         private NumericUpDown numericUpDownN;
         private ComboBox comboBoxThreads;
@@ -59,6 +62,7 @@ namespace Paisev_Client_LR3
                 MessageBox.Show("Не удалось подключиться к серверу. Сначала запустите ConsoleAppPaisev на любой доступной рабочей станции.");
                 buttonStart.Enabled = false;
                 buttonStop.Enabled = false;
+                buttonRefresh.Enabled = false;
                 buttonSend.Enabled = false;
             }
         }
@@ -67,7 +71,8 @@ namespace Paisev_Client_LR3
         {
             buttonStart = new Button { Text = "Start", Left = 20, Top = 20, Width = 110, Height = 32 };
             buttonStop = new Button { Text = "Stop", Left = 150, Top = 20, Width = 110, Height = 32 };
-            numericUpDownN = new NumericUpDown { Left = 280, Top = 24, Width = 90, Minimum = 1, Maximum = 100, Value = 1 };
+            buttonRefresh = new Button { Text = "Refresh", Left = 280, Top = 20, Width = 110, Height = 32 };
+            numericUpDownN = new NumericUpDown { Left = 410, Top = 24, Width = 90, Minimum = 1, Maximum = 100, Value = 1 };
             comboBoxThreads = new ComboBox { Left = 140, Top = 85, Width = 250, DropDownStyle = ComboBoxStyle.DropDownList };
             labelTarget = new Label { Text = "Адресат:", Left = 20, Top = 88, Width = 100 };
             labelMessage = new Label { Text = "Сообщение:", Left = 20, Top = 130, Width = 100 };
@@ -76,6 +81,7 @@ namespace Paisev_Client_LR3
 
             Controls.Add(buttonStart);
             Controls.Add(buttonStop);
+            Controls.Add(buttonRefresh);
             Controls.Add(numericUpDownN);
             Controls.Add(comboBoxThreads);
             Controls.Add(textBoxMessage);
@@ -85,12 +91,42 @@ namespace Paisev_Client_LR3
 
             buttonStart.Click += buttonStart_Click;
             buttonStop.Click += buttonStop_Click;
+            buttonRefresh.Click += buttonRefresh_Click;
             buttonSend.Click += buttonSend_Click;
         }
 
         private bool InitMap()
         {
-            mapPtr = CreateSRMapPaisev(SERVER_HOST, SERVER_PORT, "", "");
+            try
+            {
+                mapPtr = CreateSRMapPaisev(SERVER_HOST, SERVER_PORT, "", "");
+            }
+            catch (DllNotFoundException ex)
+            {
+                MessageBox.Show("Не найден SRMapPaisev.dll рядом с клиентом.\nПроверьте копирование DLL в папку с Paisev_Client_LR3.exe.\n\n" + ex.Message, "Ошибка загрузки DLL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (BadImageFormatException ex)
+            {
+                MessageBox.Show("Несовместимая разрядность клиента и SRMapPaisev.dll (x86/x64).\nСоберите клиент и DLL в одной платформе (обычно x64).\n\n" + ex.Message, "Ошибка разрядности", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (EntryPointNotFoundException ex)
+            {
+                MessageBox.Show("В SRMapPaisev.dll не найдена функция CreateSRMapPaisev.\nПроверьте, что подключена актуальная версия DLL.\n\n" + ex.Message, "Ошибка точки входа", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (Win32Exception ex)
+            {
+                MessageBox.Show("Не удалось загрузить нативные зависимости SRMapPaisev.dll (например, VC++ Runtime).\n\n" + ex.Message, "Ошибка Win32", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (SEHException ex)
+            {
+                MessageBox.Show("Низкоуровневая ошибка при вызове SRMapPaisev.dll.\nПроверьте зависимости Visual C++ Runtime и совместимость DLL.\n\n" + ex.Message, "SEH ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+
             if (mapPtr == IntPtr.Zero)
                 return false;
 
@@ -157,25 +193,28 @@ namespace Paisev_Client_LR3
             comboBoxThreads.SelectedIndex = 0;
         }
 
-        private void AddThreadToUi(int id)
-        {
-            if (id <= 0 || activeThreadIds.Contains(id))
-                return;
-
-            activeThreadIds.Add(id);
-            activeThreadIds.Sort();
-            RebuildThreadsCombo();
-        }
-
-        private void RemoveThreadFromUi(int id)
-        {
-            activeThreadIds.Remove(id);
-            RebuildThreadsCombo();
-        }
-
         private void SetStatus(string text)
         {
             Text = string.IsNullOrWhiteSpace(text) ? "DialogAppPaisev" : "DialogAppPaisev - " + text;
+        }
+
+        private void buttonRefresh_Click(object sender, EventArgs e)
+        {
+            RefreshThreadsFromServer();
+        }
+
+        private void RefreshThreadsFromServer()
+        {
+            int ok = SRMapSendCommandW(mapPtr, TARGET_MAIN_THREAD, MT_REFRESH_THREADS, "", 0, 0);
+            if (ok == 0)
+            {
+                SetStatus("Не удалось запросить обновление списка потоков.");
+                return;
+            }
+
+            var response = WaitForConfirmation();
+            SetStatus("Список потоков обновлён.");
+            FillThreadsByIds(response.text, response.auxId);
         }
 
         private void buttonStart_Click(object sender, EventArgs e)
@@ -193,7 +232,7 @@ namespace Paisev_Client_LR3
                 var response = WaitForConfirmation();
                 SetStatus(response.text);
                 if (response.status == 1)
-                    AddThreadToUi(response.auxId);
+                    RefreshThreadsFromServer();
             }
         }
 
@@ -216,7 +255,7 @@ namespace Paisev_Client_LR3
             var response = WaitForConfirmation();
             SetStatus(response.text);
             if (response.status == 1)
-                RemoveThreadFromUi(response.auxId);
+                RefreshThreadsFromServer();
         }
 
         private void buttonSend_Click(object sender, EventArgs e)
