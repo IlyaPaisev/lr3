@@ -1,176 +1,254 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
+using System.Net.Sockets;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace Paisev_Client_LR3
 {
     public class Form1 : Form
     {
-        [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
-        private static extern IntPtr CreateSRMapPaisev(string mapName, string mutexName, string messageEventName, string processedEventName);
-
-        [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern void DestroySRMapPaisev(IntPtr map);
-
-        [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
-        private static extern int SRMapSendCommandW(IntPtr map, int to, int messageType, string data, int status, int auxId);
-
-        [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
-        private static extern int SRMapReceiveW(IntPtr map, out int messageType, out int sizeBytes, out int to, out int status, out int auxId, StringBuilder buffer, int bufferChars);
-
-        [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern void SRMapWaitForProcessed(IntPtr map);
-
         private const int MT_SEND_TEXT = 1;
-        private const int MT_CREATE_THREAD = 2;
-        private const int MT_STOP_THREAD = 3;
+        private const int MT_CONFIRM = 5;
         private const int MT_DISCONNECT = 6;
+        private const int MT_REFRESH_THREADS = 7;
+        private const int MT_CLIENT_LIST = 8;
 
         private const int TARGET_ALL_THREADS = 0;
-        private const int TARGET_MAIN_THREAD = -1;
 
         private const string SERVER_HOST = "127.0.0.1";
-        private const string SERVER_PORT = "54000";
+        private const int SERVER_PORT = 54000;
+        private const int HEADER_SIZE = 20;
 
-        private Button buttonStart;
-        private Button buttonStop;
+        private Button buttonConnect;
+        private Button buttonDisconnect;
+        private Button buttonRefresh;
         private Button buttonSend;
-        private NumericUpDown numericUpDownN;
         private ComboBox comboBoxThreads;
         private TextBox textBoxMessage;
+        private ListBox listBoxMessages;
         private Label labelTarget;
         private Label labelMessage;
+        private Label labelInbox;
 
-        private IntPtr mapPtr = IntPtr.Zero;
-        private readonly List<int> activeThreadIds = new List<int>();
+        private Socket socket;
+        private Thread receiveThread;
+        private volatile bool connected;
+        private readonly object sendLock = new object();
+        private readonly List<int> activeClientIds = new List<int>();
 
         public Form1()
         {
             Text = "DialogAppPaisev";
-            Width = 700;
-            Height = 260;
+            Width = 760;
+            Height = 430;
             StartPosition = FormStartPosition.CenterScreen;
 
             BuildUi();
-            if (!InitMap())
-            {
-                MessageBox.Show("Не удалось подключиться к серверу. Сначала запустите ConsoleAppPaisev на любой доступной рабочей станции.");
-                buttonStart.Enabled = false;
-                buttonStop.Enabled = false;
-                buttonSend.Enabled = false;
-            }
+            SetConnectedState(false);
         }
 
         private void BuildUi()
         {
-            buttonStart = new Button { Text = "Start", Left = 20, Top = 20, Width = 110, Height = 32 };
-            buttonStop = new Button { Text = "Stop", Left = 150, Top = 20, Width = 110, Height = 32 };
-            numericUpDownN = new NumericUpDown { Left = 280, Top = 24, Width = 90, Minimum = 1, Maximum = 100, Value = 1 };
+            buttonConnect = new Button { Text = "Connect", Left = 20, Top = 20, Width = 110, Height = 32 };
+            buttonDisconnect = new Button { Text = "Disconnect", Left = 150, Top = 20, Width = 110, Height = 32 };
+            buttonRefresh = new Button { Text = "Refresh", Left = 280, Top = 20, Width = 110, Height = 32 };
             comboBoxThreads = new ComboBox { Left = 140, Top = 85, Width = 250, DropDownStyle = ComboBoxStyle.DropDownList };
             labelTarget = new Label { Text = "Адресат:", Left = 20, Top = 88, Width = 100 };
             labelMessage = new Label { Text = "Сообщение:", Left = 20, Top = 130, Width = 100 };
-            textBoxMessage = new TextBox { Left = 140, Top = 126, Width = 400 };
-            buttonSend = new Button { Text = "Send", Left = 560, Top = 124, Width = 90, Height = 30 };
+            textBoxMessage = new TextBox { Left = 140, Top = 126, Width = 460 };
+            buttonSend = new Button { Text = "Send", Left = 620, Top = 124, Width = 90, Height = 30 };
+            labelInbox = new Label { Text = "Полученные сообщения:", Left = 20, Top = 175, Width = 180 };
+            listBoxMessages = new ListBox { Left = 20, Top = 200, Width = 690, Height = 155 };
 
-            Controls.Add(buttonStart);
-            Controls.Add(buttonStop);
-            Controls.Add(numericUpDownN);
+            Controls.Add(buttonConnect);
+            Controls.Add(buttonDisconnect);
+            Controls.Add(buttonRefresh);
             Controls.Add(comboBoxThreads);
             Controls.Add(textBoxMessage);
             Controls.Add(buttonSend);
             Controls.Add(labelTarget);
             Controls.Add(labelMessage);
+            Controls.Add(labelInbox);
+            Controls.Add(listBoxMessages);
 
-            buttonStart.Click += buttonStart_Click;
-            buttonStop.Click += buttonStop_Click;
+            buttonConnect.Click += buttonConnect_Click;
+            buttonDisconnect.Click += buttonDisconnect_Click;
+            buttonRefresh.Click += buttonRefresh_Click;
             buttonSend.Click += buttonSend_Click;
         }
 
-        private bool InitMap()
+        private void SetConnectedState(bool isConnected)
         {
-            mapPtr = CreateSRMapPaisev(SERVER_HOST, SERVER_PORT, "", "");
-            if (mapPtr == IntPtr.Zero)
-                return false;
+            buttonConnect.Enabled = !isConnected;
+            buttonDisconnect.Enabled = isConnected;
+            buttonRefresh.Enabled = isConnected;
+            buttonSend.Enabled = isConnected;
+            comboBoxThreads.Enabled = isConnected;
+            textBoxMessage.Enabled = isConnected;
 
-            ResetUiState();
-            var response = WaitForConfirmation();
-            SetStatus("Подключено к серверу");
-            FillThreadsByIds(response.text, response.auxId);
-            return true;
+            if (!isConnected)
+            {
+                activeClientIds.Clear();
+                RebuildClientsCombo();
+            }
         }
 
-        private void FillThreadsByIds(string idsText, int fallbackCount)
+        private bool ConnectToServer()
         {
-            activeThreadIds.Clear();
+            try
+            {
+                socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                socket.Connect(SERVER_HOST, SERVER_PORT);
+
+                var firstMessage = ReceiveFromServer();
+                if (firstMessage.messageType == MT_CLIENT_LIST)
+                    FillClientsByIds(firstMessage.text, firstMessage.auxId);
+
+                connected = true;
+                receiveThread = new Thread(ReceiveLoop) { IsBackground = true };
+                receiveThread.Start();
+                SetStatus("Подключено к серверу");
+                return true;
+            }
+            catch (SocketException ex)
+            {
+                MessageBox.Show("Не удалось подключиться к серверу сообщений.\nСначала запустите ConsoleAppPaisev.\n\n" + ex.Message, "Ошибка подключения", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                DisconnectTransport();
+                return false;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Ошибка обмена с сервером сообщений.\n\n" + ex.Message, "Ошибка клиента", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                DisconnectTransport();
+                return false;
+            }
+        }
+
+        private (int messageType, int to, int status, int auxId, string text) ReceiveFromServer()
+        {
+            byte[] headerBytes = ReceiveExact(HEADER_SIZE);
+            if (headerBytes == null)
+                return (0, 0, 0, 0, "");
+
+            int messageType = BitConverter.ToInt32(headerBytes, 0);
+            int sizeBytes = BitConverter.ToInt32(headerBytes, 4);
+            int to = BitConverter.ToInt32(headerBytes, 8);
+            int status = BitConverter.ToInt32(headerBytes, 12);
+            int auxId = BitConverter.ToInt32(headerBytes, 16);
+
+            if (sizeBytes < 0 || (sizeBytes % 2) != 0 || sizeBytes > 1024 * 1024)
+                return (0, 0, 0, 0, "");
+
+            string text = "";
+            if (sizeBytes > 0)
+            {
+                byte[] textBytes = ReceiveExact(sizeBytes);
+                if (textBytes == null)
+                    return (0, 0, 0, 0, "");
+
+                text = Encoding.Unicode.GetString(textBytes);
+            }
+
+            return (messageType, to, status, auxId, text);
+        }
+
+        private byte[] ReceiveExact(int size)
+        {
+            byte[] buffer = new byte[size];
+            int offset = 0;
+            while (offset < size)
+            {
+                int read = socket.Receive(buffer, offset, size - offset, SocketFlags.None);
+                if (read <= 0)
+                    return null;
+
+                offset += read;
+            }
+            return buffer;
+        }
+
+        private void ReceiveLoop()
+        {
+            while (connected && socket != null)
+            {
+                try
+                {
+                    var message = ReceiveFromServer();
+                    if (!connected || message.messageType == 0)
+                        break;
+
+                    BeginInvoke(new Action(() => ProcessServerMessage(message.messageType, message.status, message.auxId, message.text)));
+                }
+                catch
+                {
+                    break;
+                }
+            }
+
+            if (connected && !IsDisposed)
+                BeginInvoke(new Action(() =>
+                {
+                    SetStatus("Соединение с сервером потеряно");
+                    DisconnectTransport();
+                }));
+        }
+
+        private void ProcessServerMessage(int messageType, int status, int auxId, string text)
+        {
+            if (messageType == MT_CLIENT_LIST)
+            {
+                FillClientsByIds(text, auxId);
+                SetStatus("Активных клиентов: " + auxId);
+                return;
+            }
+
+            if (messageType == MT_SEND_TEXT)
+            {
+                listBoxMessages.Items.Add(text);
+                listBoxMessages.TopIndex = listBoxMessages.Items.Count - 1;
+                return;
+            }
+
+            if (messageType == MT_CONFIRM)
+            {
+                SetStatus(text);
+                return;
+            }
+        }
+
+        private void FillClientsByIds(string idsText, int fallbackCount)
+        {
+            activeClientIds.Clear();
 
             if (!string.IsNullOrWhiteSpace(idsText))
             {
                 string[] parts = idsText.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
                 foreach (string part in parts)
                 {
-                    if (int.TryParse(part.Trim(), out int id) && id > 0 && !activeThreadIds.Contains(id))
-                        activeThreadIds.Add(id);
+                    if (int.TryParse(part.Trim(), out int id) && id > 0 && !activeClientIds.Contains(id))
+                        activeClientIds.Add(id);
                 }
             }
 
-            if (activeThreadIds.Count == 0)
+            if (activeClientIds.Count == 0)
             {
                 for (int i = 1; i <= fallbackCount; i++)
-                    activeThreadIds.Add(i);
+                    activeClientIds.Add(i);
             }
 
-            activeThreadIds.Sort();
-            RebuildThreadsCombo();
+            activeClientIds.Sort();
+            RebuildClientsCombo();
         }
 
-        private void ResetUiState()
-        {
-            activeThreadIds.Clear();
-            RebuildThreadsCombo();
-        }
-
-        private (bool ok, int messageType, int to, int status, int auxId, string text) WaitForConfirmation()
-        {
-            SRMapWaitForProcessed(mapPtr);
-
-            int messageType;
-            int sizeBytes;
-            int to;
-            int status;
-            int auxId;
-            StringBuilder buffer = new StringBuilder(4096);
-
-            int charsCount = SRMapReceiveW(mapPtr, out messageType, out sizeBytes, out to, out status, out auxId, buffer, buffer.Capacity);
-            string text = charsCount > 0 ? buffer.ToString() : "";
-            return (true, messageType, to, status, auxId, text);
-        }
-
-        private void RebuildThreadsCombo()
+        private void RebuildClientsCombo()
         {
             comboBoxThreads.Items.Clear();
-            comboBoxThreads.Items.Add("Все потоки");
-            comboBoxThreads.Items.Add("Главный поток");
-            foreach (int tid in activeThreadIds)
-                comboBoxThreads.Items.Add(tid.ToString());
-            comboBoxThreads.SelectedIndex = 0;
-        }
-
-        private void AddThreadToUi(int id)
-        {
-            if (id <= 0 || activeThreadIds.Contains(id))
-                return;
-
-            activeThreadIds.Add(id);
-            activeThreadIds.Sort();
-            RebuildThreadsCombo();
-        }
-
-        private void RemoveThreadFromUi(int id)
-        {
-            activeThreadIds.Remove(id);
-            RebuildThreadsCombo();
+            comboBoxThreads.Items.Add("Все клиенты");
+            foreach (int id in activeClientIds)
+                comboBoxThreads.Items.Add(id.ToString());
+            comboBoxThreads.SelectedIndex = comboBoxThreads.Items.Count > 0 ? 0 : -1;
         }
 
         private void SetStatus(string text)
@@ -178,45 +256,23 @@ namespace Paisev_Client_LR3
             Text = string.IsNullOrWhiteSpace(text) ? "DialogAppPaisev" : "DialogAppPaisev - " + text;
         }
 
-        private void buttonStart_Click(object sender, EventArgs e)
+        private void buttonConnect_Click(object sender, EventArgs e)
         {
-            int n = (int)numericUpDownN.Value;
-            for (int i = 0; i < n; i++)
-            {
-                int ok = SRMapSendCommandW(mapPtr, 0, MT_CREATE_THREAD, "", 0, 0);
-                if (ok == 0)
-                {
-                    SetStatus("Не удалось отправить команду создания потока.");
-                    return;
-                }
+            if (socket != null)
+                return;
 
-                var response = WaitForConfirmation();
-                SetStatus(response.text);
-                if (response.status == 1)
-                    AddThreadToUi(response.auxId);
-            }
+            if (ConnectToServer())
+                SetConnectedState(true);
         }
 
-        private void buttonStop_Click(object sender, EventArgs e)
+        private void buttonDisconnect_Click(object sender, EventArgs e)
         {
-            if (activeThreadIds.Count == 0)
-            {
-                SetStatus("Нет активных потоков для остановки.");
-                return;
-            }
+            DisconnectFromServer();
+        }
 
-            int lastId = activeThreadIds[activeThreadIds.Count - 1];
-            int sendOk = SRMapSendCommandW(mapPtr, lastId, MT_STOP_THREAD, "", 0, 0);
-            if (sendOk == 0)
-            {
-                SetStatus("Не удалось отправить команду остановки потока.");
-                return;
-            }
-
-            var response = WaitForConfirmation();
-            SetStatus(response.text);
-            if (response.status == 1)
-                RemoveThreadFromUi(response.auxId);
+        private void buttonRefresh_Click(object sender, EventArgs e)
+        {
+            SendCommand(TARGET_ALL_THREADS, MT_REFRESH_THREADS, "");
         }
 
         private void buttonSend_Click(object sender, EventArgs e)
@@ -226,34 +282,97 @@ namespace Paisev_Client_LR3
 
             int to = comboBoxThreads.SelectedIndex == 0
                 ? TARGET_ALL_THREADS
-                : comboBoxThreads.SelectedIndex == 1
-                    ? TARGET_MAIN_THREAD
-                    : int.Parse(comboBoxThreads.SelectedItem.ToString());
+                : int.Parse(comboBoxThreads.SelectedItem.ToString());
 
-            int ok = SRMapSendCommandW(mapPtr, to, MT_SEND_TEXT, textBoxMessage.Text, 0, 0);
-            if (ok == 0)
+            if (SendCommand(to, MT_SEND_TEXT, textBoxMessage.Text))
+                textBoxMessage.Clear();
+        }
+
+        private bool SendCommand(int to, int messageType, string data)
+        {
+            if (socket == null)
+                return false;
+
+            try
             {
-                SetStatus("Не удалось отправить сообщение.");
-                return;
+                byte[] textBytes = Encoding.Unicode.GetBytes(data ?? "");
+                byte[] header = new byte[HEADER_SIZE];
+                Buffer.BlockCopy(BitConverter.GetBytes(messageType), 0, header, 0, 4);
+                Buffer.BlockCopy(BitConverter.GetBytes(textBytes.Length), 0, header, 4, 4);
+                Buffer.BlockCopy(BitConverter.GetBytes(to), 0, header, 8, 4);
+                Buffer.BlockCopy(BitConverter.GetBytes(0), 0, header, 12, 4);
+                Buffer.BlockCopy(BitConverter.GetBytes(0), 0, header, 16, 4);
+
+                lock (sendLock)
+                {
+                    SendAll(header);
+                    if (textBytes.Length > 0)
+                        SendAll(textBytes);
+                }
+                return true;
+            }
+            catch (SocketException)
+            {
+                SetStatus("Не удалось отправить команду серверу.");
+                DisconnectTransport();
+                return false;
+            }
+        }
+
+        private void SendAll(byte[] data)
+        {
+            int offset = 0;
+            while (offset < data.Length)
+            {
+                int sent = socket.Send(data, offset, data.Length - offset, SocketFlags.None);
+                if (sent <= 0)
+                    throw new SocketException();
+
+                offset += sent;
+            }
+        }
+
+        private void DisconnectFromServer()
+        {
+            if (socket != null)
+                SendCommand(TARGET_ALL_THREADS, MT_DISCONNECT, "");
+
+            DisconnectTransport();
+            SetStatus("Отключено");
+        }
+
+        private void DisconnectTransport()
+        {
+            connected = false;
+
+            Socket oldSocket = socket;
+            socket = null;
+
+            if (oldSocket != null)
+            {
+                try
+                {
+                    oldSocket.Shutdown(SocketShutdown.Both);
+                }
+                catch
+                {
+                }
+
+                oldSocket.Close();
             }
 
-            var response = WaitForConfirmation();
-            SetStatus(response.text);
-            if (response.status == 1)
-                textBoxMessage.Clear();
+            if (receiveThread != null && receiveThread.IsAlive && receiveThread != Thread.CurrentThread)
+                receiveThread.Join(1000);
+
+            receiveThread = null;
+            SetConnectedState(false);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             try
             {
-                if (mapPtr != IntPtr.Zero)
-                {
-                    SRMapSendCommandW(mapPtr, 0, MT_DISCONNECT, "", 0, 0);
-                    WaitForConfirmation();
-                    DestroySRMapPaisev(mapPtr);
-                    mapPtr = IntPtr.Zero;
-                }
+                DisconnectFromServer();
             }
             catch
             {
