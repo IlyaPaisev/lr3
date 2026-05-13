@@ -321,6 +321,11 @@ namespace
                 session->connected.store(false);
                 break;
             }
+            case MT_REFRESH_THREADS:
+            {
+                SendConfirmation(*socket, TARGET_MAIN_THREAD, true, BuildActiveIdsCsv(), ActiveWorkersCount());
+                break;
+            }
             case MT_SHUTDOWN:
             {
                 SendConfirmation(session, false, L"Остановка сервера удалённо запрещена.");
