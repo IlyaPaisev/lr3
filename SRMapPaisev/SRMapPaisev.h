@@ -1,11 +1,7 @@
 #pragma once
 #include <string>
 #include <mutex>
-#include <condition_variable>
-#include <queue>
-#include <thread>
 #include <memory>
-#include <atomic>
 
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601

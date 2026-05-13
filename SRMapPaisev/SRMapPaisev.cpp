@@ -125,6 +125,12 @@ void SRMapPaisev::receive(MessagePaisev& msg) const
         return;
     }
 
+    if (header.size < 0 || (header.size % static_cast<int>(sizeof(wchar_t))) != 0 || header.size > 1024 * 1024)
+    {
+        msg = MessagePaisev();
+        return;
+    }
+
     std::wstring text;
     if (header.size > 0)
     {
