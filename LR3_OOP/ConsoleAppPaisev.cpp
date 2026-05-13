@@ -315,15 +315,10 @@ namespace
                 BroadcastClientList();
                 break;
             }
-            case MT_DISCONNECT:
+            case MT_REFRESH_THREADS:
             {
                 SendConfirmation(session, true, L"Клиент отключен от сервера.");
                 session->connected.store(false);
-                break;
-            }
-            case MT_REFRESH_THREADS:
-            {
-                SendConfirmation(*socket, TARGET_MAIN_THREAD, true, BuildActiveIdsCsv(), ActiveWorkersCount());
                 break;
             }
             case MT_SHUTDOWN:

@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -10,28 +9,17 @@ namespace Paisev_Client_LR3
 {
     public class Form1 : Form
     {
-        [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
-        private static extern IntPtr CreateSRMapPaisev(string mapName, string mutexName, string messageEventName, string processedEventName);
-
-        [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern void DestroySRMapPaisev(IntPtr map);
-
-        [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
-        private static extern int SRMapSendCommandW(IntPtr map, int to, int messageType, string data, int status, int auxId);
-
-        [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
-        private static extern int SRMapReceiveW(IntPtr map, out int messageType, out int sizeBytes, out int to, out int status, out int auxId, StringBuilder buffer, int bufferChars);
-
         private const int MT_SEND_TEXT = 1;
+        private const int MT_CONFIRM = 5;
         private const int MT_DISCONNECT = 6;
         private const int MT_REFRESH_THREADS = 7;
         private const int MT_CLIENT_LIST = 8;
-        private const int MT_CONFIRM = 5;
 
         private const int TARGET_ALL_THREADS = 0;
 
         private const string SERVER_HOST = "127.0.0.1";
-        private const string SERVER_PORT = "54000";
+        private const int SERVER_PORT = 54000;
+        private const int HEADER_SIZE = 20;
 
         private Button buttonConnect;
         private Button buttonDisconnect;
@@ -44,9 +32,10 @@ namespace Paisev_Client_LR3
         private Label labelMessage;
         private Label labelInbox;
 
-        private IntPtr mapPtr = IntPtr.Zero;
+        private Socket socket;
         private Thread receiveThread;
         private volatile bool connected;
+        private readonly object sendLock = new object();
         private readonly List<int> activeClientIds = new List<int>();
 
         public Form1()
@@ -106,69 +95,83 @@ namespace Paisev_Client_LR3
             }
         }
 
-        private bool InitMap()
+        private bool ConnectToServer()
         {
             try
             {
-                mapPtr = CreateSRMapPaisev(SERVER_HOST, SERVER_PORT, "", "");
-            }
-            catch (DllNotFoundException ex)
-            {
-                MessageBox.Show("Не найден SRMapPaisev.dll рядом с клиентом.\nПроверьте копирование DLL в папку с Paisev_Client_LR3.exe.\n\n" + ex.Message, "Ошибка загрузки DLL", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return false;
-            }
-            catch (BadImageFormatException ex)
-            {
-                MessageBox.Show("Несовместимая разрядность клиента и SRMapPaisev.dll (x86/x64).\nСоберите клиент и DLL в одной платформе (обычно x64).\n\n" + ex.Message, "Ошибка разрядности", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return false;
-            }
-            catch (EntryPointNotFoundException ex)
-            {
-                MessageBox.Show("В SRMapPaisev.dll не найдена функция CreateSRMapPaisev.\nПроверьте, что подключена актуальная версия DLL.\n\n" + ex.Message, "Ошибка точки входа", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return false;
-            }
-            catch (Win32Exception ex)
-            {
-                MessageBox.Show("Не удалось загрузить нативные зависимости SRMapPaisev.dll (например, VC++ Runtime).\n\n" + ex.Message, "Ошибка Win32", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return false;
-            }
-            catch (SEHException ex)
-            {
-                MessageBox.Show("Низкоуровневая ошибка при вызове SRMapPaisev.dll.\nПроверьте зависимости Visual C++ Runtime и совместимость DLL.\n\n" + ex.Message, "SEH ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return false;
-            }
+                socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                socket.Connect(SERVER_HOST, SERVER_PORT);
 
-            if (mapPtr == IntPtr.Zero)
+                var firstMessage = ReceiveFromServer();
+                if (firstMessage.messageType == MT_CLIENT_LIST)
+                    FillClientsByIds(firstMessage.text, firstMessage.auxId);
+
+                connected = true;
+                receiveThread = new Thread(ReceiveLoop) { IsBackground = true };
+                receiveThread.Start();
+                SetStatus("Подключено к серверу");
+                return true;
+            }
+            catch (SocketException ex)
+            {
+                MessageBox.Show("Не удалось подключиться к серверу сообщений.\nСначала запустите ConsoleAppPaisev.\n\n" + ex.Message, "Ошибка подключения", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                DisconnectTransport();
                 return false;
-
-            var firstMessage = ReceiveFromServer();
-            if (firstMessage.messageType == MT_CLIENT_LIST)
-                FillClientsByIds(firstMessage.text, firstMessage.auxId);
-
-            connected = true;
-            receiveThread = new Thread(ReceiveLoop) { IsBackground = true };
-            receiveThread.Start();
-            SetStatus("Подключено к серверу");
-            return true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Ошибка обмена с сервером сообщений.\n\n" + ex.Message, "Ошибка клиента", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                DisconnectTransport();
+                return false;
+            }
         }
 
         private (int messageType, int to, int status, int auxId, string text) ReceiveFromServer()
         {
-            int messageType;
-            int sizeBytes;
-            int to;
-            int status;
-            int auxId;
-            StringBuilder buffer = new StringBuilder(4096);
+            byte[] headerBytes = ReceiveExact(HEADER_SIZE);
+            if (headerBytes == null)
+                return (0, 0, 0, 0, "");
 
-            int charsCount = SRMapReceiveW(mapPtr, out messageType, out sizeBytes, out to, out status, out auxId, buffer, buffer.Capacity);
-            string text = charsCount > 0 ? buffer.ToString() : "";
+            int messageType = BitConverter.ToInt32(headerBytes, 0);
+            int sizeBytes = BitConverter.ToInt32(headerBytes, 4);
+            int to = BitConverter.ToInt32(headerBytes, 8);
+            int status = BitConverter.ToInt32(headerBytes, 12);
+            int auxId = BitConverter.ToInt32(headerBytes, 16);
+
+            if (sizeBytes < 0 || (sizeBytes % 2) != 0 || sizeBytes > 1024 * 1024)
+                return (0, 0, 0, 0, "");
+
+            string text = "";
+            if (sizeBytes > 0)
+            {
+                byte[] textBytes = ReceiveExact(sizeBytes);
+                if (textBytes == null)
+                    return (0, 0, 0, 0, "");
+
+                text = Encoding.Unicode.GetString(textBytes);
+            }
+
             return (messageType, to, status, auxId, text);
+        }
+
+        private byte[] ReceiveExact(int size)
+        {
+            byte[] buffer = new byte[size];
+            int offset = 0;
+            while (offset < size)
+            {
+                int read = socket.Receive(buffer, offset, size - offset, SocketFlags.None);
+                if (read <= 0)
+                    return null;
+
+                offset += read;
+            }
+            return buffer;
         }
 
         private void ReceiveLoop()
         {
-            while (connected && mapPtr != IntPtr.Zero)
+            while (connected && socket != null)
             {
                 try
                 {
@@ -255,17 +258,11 @@ namespace Paisev_Client_LR3
 
         private void buttonConnect_Click(object sender, EventArgs e)
         {
-            if (mapPtr != IntPtr.Zero)
+            if (socket != null)
                 return;
 
-            if (!InitMap())
-            {
-                MessageBox.Show("Не удалось подключиться к серверу. Сначала запустите ConsoleAppPaisev на любой доступной рабочей станции.");
-                DisconnectTransport();
-                return;
-            }
-
-            SetConnectedState(true);
+            if (ConnectToServer())
+                SetConnectedState(true);
         }
 
         private void buttonDisconnect_Click(object sender, EventArgs e)
@@ -293,23 +290,55 @@ namespace Paisev_Client_LR3
 
         private bool SendCommand(int to, int messageType, string data)
         {
-            if (mapPtr == IntPtr.Zero)
+            if (socket == null)
                 return false;
 
-            int ok = SRMapSendCommandW(mapPtr, to, messageType, data, 0, 0);
-            if (ok == 0)
+            try
+            {
+                byte[] textBytes = Encoding.Unicode.GetBytes(data ?? "");
+                byte[] header = new byte[HEADER_SIZE];
+                Buffer.BlockCopy(BitConverter.GetBytes(messageType), 0, header, 0, 4);
+                Buffer.BlockCopy(BitConverter.GetBytes(textBytes.Length), 0, header, 4, 4);
+                Buffer.BlockCopy(BitConverter.GetBytes(to), 0, header, 8, 4);
+                Buffer.BlockCopy(BitConverter.GetBytes(0), 0, header, 12, 4);
+                Buffer.BlockCopy(BitConverter.GetBytes(0), 0, header, 16, 4);
+
+                lock (sendLock)
+                {
+                    SendAll(header);
+                    if (textBytes.Length > 0)
+                        SendAll(textBytes);
+                }
+                return true;
+            }
+            catch (SocketException)
             {
                 SetStatus("Не удалось отправить команду серверу.");
+                DisconnectTransport();
                 return false;
             }
 
-            return true;
+            activeClientIds.Sort();
+            RebuildClientsCombo();
+        }
+
+        private void SendAll(byte[] data)
+        {
+            int offset = 0;
+            while (offset < data.Length)
+            {
+                int sent = socket.Send(data, offset, data.Length - offset, SocketFlags.None);
+                if (sent <= 0)
+                    throw new SocketException();
+
+                offset += sent;
+            }
         }
 
         private void DisconnectFromServer()
         {
-            if (mapPtr != IntPtr.Zero)
-                SRMapSendCommandW(mapPtr, 0, MT_DISCONNECT, "", 0, 0);
+            if (socket != null)
+                SendCommand(TARGET_ALL_THREADS, MT_DISCONNECT, "");
 
             DisconnectTransport();
             SetStatus("Отключено");
@@ -319,16 +348,26 @@ namespace Paisev_Client_LR3
         {
             connected = false;
 
+            Socket oldSocket = socket;
+            socket = null;
+
+            if (oldSocket != null)
+            {
+                try
+                {
+                    oldSocket.Shutdown(SocketShutdown.Both);
+                }
+                catch
+                {
+                }
+
+                oldSocket.Close();
+            }
+
             if (receiveThread != null && receiveThread.IsAlive && receiveThread != Thread.CurrentThread)
                 receiveThread.Join(1000);
 
             receiveThread = null;
-
-            if (mapPtr != IntPtr.Zero)
-            {
-                DestroySRMapPaisev(mapPtr);
-                mapPtr = IntPtr.Zero;
-            }
             SetConnectedState(false);
         }
 
