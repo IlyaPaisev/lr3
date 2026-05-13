@@ -315,7 +315,7 @@ namespace
                 BroadcastClientList();
                 break;
             }
-            case MT_DISCONNECT:
+            case MT_REFRESH_THREADS:
             {
                 SendConfirmation(session, true, L"Клиент отключен от сервера.");
                 session->connected.store(false);
