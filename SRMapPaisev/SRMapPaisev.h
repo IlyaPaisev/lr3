@@ -1,38 +1,32 @@
-﻿#pragma once
+#pragma once
 #include <string>
 #include <mutex>
-#include <condition_variable>
-#include <queue>
-#include <thread>
 #include <memory>
-#include <atomic>
+
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+
 #include <boost/asio.hpp>
 #include "MessagePaisev.h"
 
-#ifdef TRANSPORT_EXPORTS
+#if defined(TRANSPORT_EXPORTS) || defined(SRMAPPAISEV_EXPORTS)
 #define SRMAP_API __declspec(dllexport)
 #else
 #define SRMAP_API __declspec(dllimport)
 #endif
 
-class SRMAP_API SRMapPaisev : public ISenderPaisev, public IReceiverPaisev
+class SRMapPaisev : public ISenderPaisev, public IReceiverPaisev
 {
 private:
     std::wstring host;
     int port;
 
     mutable std::mutex sendMutex;
-    mutable std::mutex queueMutex;
-    mutable std::condition_variable queueCv;
-    mutable std::queue<MessagePaisev> incoming;
+    mutable std::mutex receiveMutex;
 
     std::unique_ptr<boost::asio::io_context> ioContext;
     std::shared_ptr<boost::asio::ip::tcp::socket> socket;
-    std::unique_ptr<std::thread> readerThread;
-
-    std::atomic<bool> running;
-
-    void readerLoop();
 
 public:
     SRMapPaisev(const wchar_t* hostName, const wchar_t* portName, const wchar_t* unused1, const wchar_t* unused2);
