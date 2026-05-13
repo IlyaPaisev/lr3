@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace Paisev_Client_LR3
@@ -20,121 +22,138 @@ namespace Paisev_Client_LR3
         [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         private static extern int SRMapReceiveW(IntPtr map, out int messageType, out int sizeBytes, out int to, out int status, out int auxId, StringBuilder buffer, int bufferChars);
 
-        [DllImport("SRMapPaisev.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern void SRMapWaitForProcessed(IntPtr map);
-
         private const int MT_SEND_TEXT = 1;
-        private const int MT_CREATE_THREAD = 2;
-        private const int MT_STOP_THREAD = 3;
         private const int MT_DISCONNECT = 6;
+        private const int MT_REFRESH_THREADS = 7;
+        private const int MT_CLIENT_LIST = 8;
+        private const int MT_CONFIRM = 5;
 
         private const int TARGET_ALL_THREADS = 0;
-        private const int TARGET_MAIN_THREAD = -1;
 
         private const string SERVER_HOST = "127.0.0.1";
         private const string SERVER_PORT = "54000";
 
-        private Button buttonStart;
-        private Button buttonStop;
+        private Button buttonConnect;
+        private Button buttonDisconnect;
+        private Button buttonRefresh;
         private Button buttonSend;
-        private NumericUpDown numericUpDownN;
         private ComboBox comboBoxThreads;
         private TextBox textBoxMessage;
+        private ListBox listBoxMessages;
         private Label labelTarget;
         private Label labelMessage;
+        private Label labelInbox;
 
         private IntPtr mapPtr = IntPtr.Zero;
-        private readonly List<int> activeThreadIds = new List<int>();
+        private Thread receiveThread;
+        private volatile bool connected;
+        private readonly List<int> activeClientIds = new List<int>();
 
         public Form1()
         {
             Text = "DialogAppPaisev";
-            Width = 700;
-            Height = 260;
+            Width = 760;
+            Height = 430;
             StartPosition = FormStartPosition.CenterScreen;
 
             BuildUi();
-            if (!InitMap())
-            {
-                MessageBox.Show("Не удалось подключиться к серверу. Сначала запустите ConsoleAppPaisev на любой доступной рабочей станции.");
-                buttonStart.Enabled = false;
-                buttonStop.Enabled = false;
-                buttonSend.Enabled = false;
-            }
+            SetConnectedState(false);
         }
 
         private void BuildUi()
         {
-            buttonStart = new Button { Text = "Start", Left = 20, Top = 20, Width = 110, Height = 32 };
-            buttonStop = new Button { Text = "Stop", Left = 150, Top = 20, Width = 110, Height = 32 };
-            numericUpDownN = new NumericUpDown { Left = 280, Top = 24, Width = 90, Minimum = 1, Maximum = 100, Value = 1 };
+            buttonConnect = new Button { Text = "Connect", Left = 20, Top = 20, Width = 110, Height = 32 };
+            buttonDisconnect = new Button { Text = "Disconnect", Left = 150, Top = 20, Width = 110, Height = 32 };
+            buttonRefresh = new Button { Text = "Refresh", Left = 280, Top = 20, Width = 110, Height = 32 };
             comboBoxThreads = new ComboBox { Left = 140, Top = 85, Width = 250, DropDownStyle = ComboBoxStyle.DropDownList };
             labelTarget = new Label { Text = "Адресат:", Left = 20, Top = 88, Width = 100 };
             labelMessage = new Label { Text = "Сообщение:", Left = 20, Top = 130, Width = 100 };
-            textBoxMessage = new TextBox { Left = 140, Top = 126, Width = 400 };
-            buttonSend = new Button { Text = "Send", Left = 560, Top = 124, Width = 90, Height = 30 };
+            textBoxMessage = new TextBox { Left = 140, Top = 126, Width = 460 };
+            buttonSend = new Button { Text = "Send", Left = 620, Top = 124, Width = 90, Height = 30 };
+            labelInbox = new Label { Text = "Полученные сообщения:", Left = 20, Top = 175, Width = 180 };
+            listBoxMessages = new ListBox { Left = 20, Top = 200, Width = 690, Height = 155 };
 
-            Controls.Add(buttonStart);
-            Controls.Add(buttonStop);
-            Controls.Add(numericUpDownN);
+            Controls.Add(buttonConnect);
+            Controls.Add(buttonDisconnect);
+            Controls.Add(buttonRefresh);
             Controls.Add(comboBoxThreads);
             Controls.Add(textBoxMessage);
             Controls.Add(buttonSend);
             Controls.Add(labelTarget);
             Controls.Add(labelMessage);
+            Controls.Add(labelInbox);
+            Controls.Add(listBoxMessages);
 
-            buttonStart.Click += buttonStart_Click;
-            buttonStop.Click += buttonStop_Click;
+            buttonConnect.Click += buttonConnect_Click;
+            buttonDisconnect.Click += buttonDisconnect_Click;
+            buttonRefresh.Click += buttonRefresh_Click;
             buttonSend.Click += buttonSend_Click;
+        }
+
+        private void SetConnectedState(bool isConnected)
+        {
+            buttonConnect.Enabled = !isConnected;
+            buttonDisconnect.Enabled = isConnected;
+            buttonRefresh.Enabled = isConnected;
+            buttonSend.Enabled = isConnected;
+            comboBoxThreads.Enabled = isConnected;
+            textBoxMessage.Enabled = isConnected;
+
+            if (!isConnected)
+            {
+                activeClientIds.Clear();
+                RebuildClientsCombo();
+            }
         }
 
         private bool InitMap()
         {
-            mapPtr = CreateSRMapPaisev(SERVER_HOST, SERVER_PORT, "", "");
+            try
+            {
+                mapPtr = CreateSRMapPaisev(SERVER_HOST, SERVER_PORT, "", "");
+            }
+            catch (DllNotFoundException ex)
+            {
+                MessageBox.Show("Не найден SRMapPaisev.dll рядом с клиентом.\nПроверьте копирование DLL в папку с Paisev_Client_LR3.exe.\n\n" + ex.Message, "Ошибка загрузки DLL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (BadImageFormatException ex)
+            {
+                MessageBox.Show("Несовместимая разрядность клиента и SRMapPaisev.dll (x86/x64).\nСоберите клиент и DLL в одной платформе (обычно x64).\n\n" + ex.Message, "Ошибка разрядности", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (EntryPointNotFoundException ex)
+            {
+                MessageBox.Show("В SRMapPaisev.dll не найдена функция CreateSRMapPaisev.\nПроверьте, что подключена актуальная версия DLL.\n\n" + ex.Message, "Ошибка точки входа", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (Win32Exception ex)
+            {
+                MessageBox.Show("Не удалось загрузить нативные зависимости SRMapPaisev.dll (например, VC++ Runtime).\n\n" + ex.Message, "Ошибка Win32", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            catch (SEHException ex)
+            {
+                MessageBox.Show("Низкоуровневая ошибка при вызове SRMapPaisev.dll.\nПроверьте зависимости Visual C++ Runtime и совместимость DLL.\n\n" + ex.Message, "SEH ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+
             if (mapPtr == IntPtr.Zero)
                 return false;
 
-            ResetUiState();
-            var response = WaitForConfirmation();
+            var firstMessage = ReceiveFromServer();
+            if (firstMessage.messageType == MT_CLIENT_LIST)
+                FillClientsByIds(firstMessage.text, firstMessage.auxId);
+
+            connected = true;
+            receiveThread = new Thread(ReceiveLoop) { IsBackground = true };
+            receiveThread.Start();
             SetStatus("Подключено к серверу");
-            FillThreadsByIds(response.text, response.auxId);
             return true;
         }
 
-        private void FillThreadsByIds(string idsText, int fallbackCount)
+        private (int messageType, int to, int status, int auxId, string text) ReceiveFromServer()
         {
-            activeThreadIds.Clear();
-
-            if (!string.IsNullOrWhiteSpace(idsText))
-            {
-                string[] parts = idsText.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (string part in parts)
-                {
-                    if (int.TryParse(part.Trim(), out int id) && id > 0 && !activeThreadIds.Contains(id))
-                        activeThreadIds.Add(id);
-                }
-            }
-
-            if (activeThreadIds.Count == 0)
-            {
-                for (int i = 1; i <= fallbackCount; i++)
-                    activeThreadIds.Add(i);
-            }
-
-            activeThreadIds.Sort();
-            RebuildThreadsCombo();
-        }
-
-        private void ResetUiState()
-        {
-            activeThreadIds.Clear();
-            RebuildThreadsCombo();
-        }
-
-        private (bool ok, int messageType, int to, int status, int auxId, string text) WaitForConfirmation()
-        {
-            SRMapWaitForProcessed(mapPtr);
-
             int messageType;
             int sizeBytes;
             int to;
@@ -144,33 +163,89 @@ namespace Paisev_Client_LR3
 
             int charsCount = SRMapReceiveW(mapPtr, out messageType, out sizeBytes, out to, out status, out auxId, buffer, buffer.Capacity);
             string text = charsCount > 0 ? buffer.ToString() : "";
-            return (true, messageType, to, status, auxId, text);
+            return (messageType, to, status, auxId, text);
         }
 
-        private void RebuildThreadsCombo()
+        private void ReceiveLoop()
+        {
+            while (connected && mapPtr != IntPtr.Zero)
+            {
+                try
+                {
+                    var message = ReceiveFromServer();
+                    if (!connected || message.messageType == 0)
+                        break;
+
+                    BeginInvoke(new Action(() => ProcessServerMessage(message.messageType, message.status, message.auxId, message.text)));
+                }
+                catch
+                {
+                    break;
+                }
+            }
+
+            if (connected && !IsDisposed)
+                BeginInvoke(new Action(() =>
+                {
+                    SetStatus("Соединение с сервером потеряно");
+                    DisconnectTransport();
+                }));
+        }
+
+        private void ProcessServerMessage(int messageType, int status, int auxId, string text)
+        {
+            if (messageType == MT_CLIENT_LIST)
+            {
+                FillClientsByIds(text, auxId);
+                SetStatus("Активных клиентов: " + auxId);
+                return;
+            }
+
+            if (messageType == MT_SEND_TEXT)
+            {
+                listBoxMessages.Items.Add(text);
+                listBoxMessages.TopIndex = listBoxMessages.Items.Count - 1;
+                return;
+            }
+
+            if (messageType == MT_CONFIRM)
+            {
+                SetStatus(text);
+                return;
+            }
+        }
+
+        private void FillClientsByIds(string idsText, int fallbackCount)
+        {
+            activeClientIds.Clear();
+
+            if (!string.IsNullOrWhiteSpace(idsText))
+            {
+                string[] parts = idsText.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (string part in parts)
+                {
+                    if (int.TryParse(part.Trim(), out int id) && id > 0 && !activeClientIds.Contains(id))
+                        activeClientIds.Add(id);
+                }
+            }
+
+            if (activeClientIds.Count == 0)
+            {
+                for (int i = 1; i <= fallbackCount; i++)
+                    activeClientIds.Add(i);
+            }
+
+            activeClientIds.Sort();
+            RebuildClientsCombo();
+        }
+
+        private void RebuildClientsCombo()
         {
             comboBoxThreads.Items.Clear();
-            comboBoxThreads.Items.Add("Все потоки");
-            comboBoxThreads.Items.Add("Главный поток");
-            foreach (int tid in activeThreadIds)
-                comboBoxThreads.Items.Add(tid.ToString());
-            comboBoxThreads.SelectedIndex = 0;
-        }
-
-        private void AddThreadToUi(int id)
-        {
-            if (id <= 0 || activeThreadIds.Contains(id))
-                return;
-
-            activeThreadIds.Add(id);
-            activeThreadIds.Sort();
-            RebuildThreadsCombo();
-        }
-
-        private void RemoveThreadFromUi(int id)
-        {
-            activeThreadIds.Remove(id);
-            RebuildThreadsCombo();
+            comboBoxThreads.Items.Add("Все клиенты");
+            foreach (int id in activeClientIds)
+                comboBoxThreads.Items.Add(id.ToString());
+            comboBoxThreads.SelectedIndex = comboBoxThreads.Items.Count > 0 ? 0 : -1;
         }
 
         private void SetStatus(string text)
@@ -178,45 +253,29 @@ namespace Paisev_Client_LR3
             Text = string.IsNullOrWhiteSpace(text) ? "DialogAppPaisev" : "DialogAppPaisev - " + text;
         }
 
-        private void buttonStart_Click(object sender, EventArgs e)
+        private void buttonConnect_Click(object sender, EventArgs e)
         {
-            int n = (int)numericUpDownN.Value;
-            for (int i = 0; i < n; i++)
-            {
-                int ok = SRMapSendCommandW(mapPtr, 0, MT_CREATE_THREAD, "", 0, 0);
-                if (ok == 0)
-                {
-                    SetStatus("Не удалось отправить команду создания потока.");
-                    return;
-                }
+            if (mapPtr != IntPtr.Zero)
+                return;
 
-                var response = WaitForConfirmation();
-                SetStatus(response.text);
-                if (response.status == 1)
-                    AddThreadToUi(response.auxId);
+            if (!InitMap())
+            {
+                MessageBox.Show("Не удалось подключиться к серверу. Сначала запустите ConsoleAppPaisev на любой доступной рабочей станции.");
+                DisconnectTransport();
+                return;
             }
+
+            SetConnectedState(true);
         }
 
-        private void buttonStop_Click(object sender, EventArgs e)
+        private void buttonDisconnect_Click(object sender, EventArgs e)
         {
-            if (activeThreadIds.Count == 0)
-            {
-                SetStatus("Нет активных потоков для остановки.");
-                return;
-            }
+            DisconnectFromServer();
+        }
 
-            int lastId = activeThreadIds[activeThreadIds.Count - 1];
-            int sendOk = SRMapSendCommandW(mapPtr, lastId, MT_STOP_THREAD, "", 0, 0);
-            if (sendOk == 0)
-            {
-                SetStatus("Не удалось отправить команду остановки потока.");
-                return;
-            }
-
-            var response = WaitForConfirmation();
-            SetStatus(response.text);
-            if (response.status == 1)
-                RemoveThreadFromUi(response.auxId);
+        private void buttonRefresh_Click(object sender, EventArgs e)
+        {
+            SendCommand(TARGET_ALL_THREADS, MT_REFRESH_THREADS, "");
         }
 
         private void buttonSend_Click(object sender, EventArgs e)
@@ -226,34 +285,58 @@ namespace Paisev_Client_LR3
 
             int to = comboBoxThreads.SelectedIndex == 0
                 ? TARGET_ALL_THREADS
-                : comboBoxThreads.SelectedIndex == 1
-                    ? TARGET_MAIN_THREAD
-                    : int.Parse(comboBoxThreads.SelectedItem.ToString());
+                : int.Parse(comboBoxThreads.SelectedItem.ToString());
 
-            int ok = SRMapSendCommandW(mapPtr, to, MT_SEND_TEXT, textBoxMessage.Text, 0, 0);
+            if (SendCommand(to, MT_SEND_TEXT, textBoxMessage.Text))
+                textBoxMessage.Clear();
+        }
+
+        private bool SendCommand(int to, int messageType, string data)
+        {
+            if (mapPtr == IntPtr.Zero)
+                return false;
+
+            int ok = SRMapSendCommandW(mapPtr, to, messageType, data, 0, 0);
             if (ok == 0)
             {
-                SetStatus("Не удалось отправить сообщение.");
-                return;
+                SetStatus("Не удалось отправить команду серверу.");
+                return false;
             }
 
-            var response = WaitForConfirmation();
-            SetStatus(response.text);
-            if (response.status == 1)
-                textBoxMessage.Clear();
+            return true;
+        }
+
+        private void DisconnectFromServer()
+        {
+            if (mapPtr != IntPtr.Zero)
+                SRMapSendCommandW(mapPtr, 0, MT_DISCONNECT, "", 0, 0);
+
+            DisconnectTransport();
+            SetStatus("Отключено");
+        }
+
+        private void DisconnectTransport()
+        {
+            connected = false;
+
+            if (receiveThread != null && receiveThread.IsAlive && receiveThread != Thread.CurrentThread)
+                receiveThread.Join(1000);
+
+            receiveThread = null;
+
+            if (mapPtr != IntPtr.Zero)
+            {
+                DestroySRMapPaisev(mapPtr);
+                mapPtr = IntPtr.Zero;
+            }
+            SetConnectedState(false);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             try
             {
-                if (mapPtr != IntPtr.Zero)
-                {
-                    SRMapSendCommandW(mapPtr, 0, MT_DISCONNECT, "", 0, 0);
-                    WaitForConfirmation();
-                    DestroySRMapPaisev(mapPtr);
-                    mapPtr = IntPtr.Zero;
-                }
+                DisconnectFromServer();
             }
             catch
             {

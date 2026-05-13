@@ -1,4 +1,8 @@
-﻿#include <winsock2.h>
+﻿#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+
+#include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <iostream>
@@ -6,15 +10,16 @@
 #include <thread>
 #include <memory>
 #include <mutex>
-#include <fstream>
 #include <string>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <locale>
+#include <stdexcept>
 
 #include <boost/asio.hpp>
 
 #include "MessagePaisev.h"
-#include "Session.h"
 
 using boost::asio::ip::tcp;
 
@@ -22,10 +27,23 @@ namespace
 {
     const unsigned short SERVER_PORT = 54000;
 
-    std::vector<std::shared_ptr<Session>> g_sessions;
-    std::vector<std::thread> g_threads;
-    std::mutex g_sessionsMutex;
+    struct ClientSession
+    {
+        int sessionID;
+        std::shared_ptr<tcp::socket> socket;
+        std::shared_ptr<std::thread> thread;
+        std::mutex sendMutex;
+        std::atomic<bool> connected;
+        std::chrono::steady_clock::time_point lastActivity;
 
+        ClientSession(int id, std::shared_ptr<tcp::socket> clientSocket)
+            : sessionID(id), socket(std::move(clientSocket)), connected(true), lastActivity(std::chrono::steady_clock::now())
+        {
+        }
+    };
+
+    std::vector<std::shared_ptr<ClientSession>> g_sessions;
+    std::mutex g_sessionsMutex;
     std::atomic<bool> g_running = true;
     std::mutex g_logMutex;
 
@@ -47,6 +65,9 @@ namespace
     {
         MessageHeaderPaisev header{};
         if (!ReadExact(socket, &header, sizeof(header)))
+            return false;
+
+        if (header.size < 0 || (header.size % static_cast<int>(sizeof(wchar_t))) != 0 || header.size > 1024 * 1024)
             return false;
 
         std::wstring text;
@@ -74,20 +95,43 @@ namespace
         return true;
     }
 
+    class SocketSender final : public ISenderPaisev
+    {
+    public:
+        explicit SocketSender(tcp::socket& sock) : socket(sock) {}
+        void send(MessagePaisev& msg) const override { SendMessage(socket, msg); }
+        void sendConfirmation(MessagePaisev& msg) const override { SendMessage(socket, msg); }
+    private:
+        tcp::socket& socket;
+    };
+
+    class SocketReceiver final : public IReceiverPaisev
+    {
+    public:
+        explicit SocketReceiver(tcp::socket& sock) : socket(sock) {}
+        void receive(MessagePaisev& msg) const override
+        {
+            if (!ReceiveMessage(socket, msg))
+                throw std::runtime_error("client disconnected");
+        }
+    private:
+        tcp::socket& socket;
+    };
+
     void Log(const std::wstring& text)
     {
         std::lock_guard<std::mutex> lock(g_logMutex);
         std::wcout << text << std::endl;
     }
 
-    int AllocateWorkerId()
+    int AllocateClientIdLocked()
     {
         int id = 1;
         while (true)
         {
-            auto it = std::find_if(g_sessions.begin(), g_sessions.end(), [id](const std::shared_ptr<Session>& s)
+            auto it = std::find_if(g_sessions.begin(), g_sessions.end(), [id](const std::shared_ptr<ClientSession>& session)
                 {
-                    return s->sessionID == id;
+                    return session->sessionID == id;
                 });
 
             if (it == g_sessions.end())
@@ -97,206 +141,198 @@ namespace
         }
     }
 
-    void WorkerProc(std::shared_ptr<Session> session)
-    {
-        Log(L"[worker " + std::to_wstring(session->sessionID) + L"] started");
-
-        while (session->isRunning())
-        {
-            MessagePaisev msg;
-            if (!session->getMessage(msg))
-                break;
-
-            if (msg.header.messageType == MT_STOP_THREAD)
-                break;
-
-            if (msg.header.messageType == MT_SEND_TEXT)
-            {
-                std::wstring fileName = std::to_wstring(session->sessionID) + L".txt";
-                std::wofstream file(fileName, std::ios::app);
-
-                if (file.is_open())
-                    file << msg.data << std::endl;
-            }
-        }
-
-        session->stop();
-        Log(L"[worker " + std::to_wstring(session->sessionID) + L"] finished");
-    }
-
-    int ActiveWorkersCount()
-    {
-        return static_cast<int>(g_sessions.size());
-    }
-
-    std::wstring BuildActiveIdsCsv()
+    std::wstring BuildActiveIdsCsvLocked()
     {
         std::wstring result;
         bool first = true;
         for (const auto& session : g_sessions)
         {
+            if (!session->connected.load())
+                continue;
+
             if (!first)
                 result += L",";
+
             result += std::to_wstring(session->sessionID);
             first = false;
         }
         return result;
     }
 
-    int CreateWorker()
+    int ActiveClientsCountLocked()
     {
-        int id = AllocateWorkerId();
-        auto session = std::make_shared<Session>(id);
-
-        g_threads.emplace_back([session]()
+        return static_cast<int>(std::count_if(g_sessions.begin(), g_sessions.end(), [](const std::shared_ptr<ClientSession>& session)
             {
-                WorkerProc(session);
-            });
-
-        g_sessions.push_back(session);
-        return id;
+                return session->connected.load();
+            }));
     }
 
-    bool StopWorker(int id)
+    void SendToClient(const std::shared_ptr<ClientSession>& session, MessagePaisev msg)
     {
-        auto it = std::find_if(g_sessions.begin(), g_sessions.end(), [id](const std::shared_ptr<Session>& s)
-            {
-                return s->sessionID == id;
-            });
+        if (!session || !session->connected.load() || !session->socket)
+            return;
 
-        if (it == g_sessions.end())
-            return false;
-
-        MessagePaisev stopMsg(id, MT_STOP_THREAD, L"");
-        (*it)->addMessage(stopMsg);
-        (*it)->stop();
-        g_sessions.erase(it);
-        return true;
+        std::lock_guard<std::mutex> lock(session->sendMutex);
+        SocketSender sender(*session->socket);
+        msg.send(sender);
     }
 
-    void JoinAndCleanupThreads()
+    void SendConfirmation(const std::shared_ptr<ClientSession>& session, bool ok, const std::wstring& text, int auxId = 0)
     {
-        for (auto& t : g_threads)
+        MessagePaisev response(session ? session->sessionID : TARGET_MAIN_THREAD, MT_CONFIRM, text, ok ? 1 : 0, auxId);
+        SendToClient(session, response);
+    }
+
+    std::vector<std::shared_ptr<ClientSession>> SnapshotClientsLocked()
+    {
+        std::vector<std::shared_ptr<ClientSession>> result;
+        for (const auto& session : g_sessions)
         {
-            if (t.joinable())
-                t.join();
+            if (session->connected.load())
+                result.push_back(session);
         }
-        g_threads.clear();
+        return result;
     }
 
-    void RouteMessageToSessions(const MessagePaisev& incoming)
+    void BroadcastClientList()
     {
-        if (incoming.header.to == TARGET_ALL_THREADS)
+        std::vector<std::shared_ptr<ClientSession>> recipients;
+        std::wstring ids;
+        int count = 0;
+
         {
-            for (auto& s : g_sessions)
+            std::lock_guard<std::mutex> lock(g_sessionsMutex);
+            recipients = SnapshotClientsLocked();
+            ids = BuildActiveIdsCsvLocked();
+            count = ActiveClientsCountLocked();
+        }
+
+        for (const auto& session : recipients)
+        {
+            MessagePaisev listMessage(session->sessionID, MT_CLIENT_LIST, ids, 1, count);
+            SendToClient(session, listMessage);
+        }
+    }
+
+    void RemoveClient(int id)
+    {
+        std::shared_ptr<ClientSession> removed;
+        {
+            std::lock_guard<std::mutex> lock(g_sessionsMutex);
+            auto it = std::find_if(g_sessions.begin(), g_sessions.end(), [id](const std::shared_ptr<ClientSession>& session)
+                {
+                    return session->sessionID == id;
+                });
+
+            if (it != g_sessions.end())
             {
-                MessagePaisev copy(
-                    s->sessionID,
-                    static_cast<MessageTypesPaisev>(incoming.header.messageType),
-                    incoming.data,
-                    incoming.header.status,
-                    incoming.header.auxId);
-                s->addMessage(copy);
+                removed = *it;
+                removed->connected.store(false);
+                g_sessions.erase(it);
             }
+        }
+
+        if (removed && removed->socket)
+        {
+            boost::system::error_code ignored;
+            removed->socket->shutdown(tcp::socket::shutdown_both, ignored);
+            removed->socket->close(ignored);
+        }
+
+        BroadcastClientList();
+        Log(L"[client " + std::to_wstring(id) + L"] disconnected");
+    }
+
+    void RouteTextMessage(const std::shared_ptr<ClientSession>& sender, const MessagePaisev& incoming)
+    {
+        std::vector<std::shared_ptr<ClientSession>> recipients;
+        {
+            std::lock_guard<std::mutex> lock(g_sessionsMutex);
+            if (incoming.header.to == TARGET_ALL_THREADS)
+            {
+                recipients = SnapshotClientsLocked();
+            }
+            else
+            {
+                auto it = std::find_if(g_sessions.begin(), g_sessions.end(), [&incoming](const std::shared_ptr<ClientSession>& session)
+                    {
+                        return session->sessionID == incoming.header.to && session->connected.load();
+                    });
+
+                if (it != g_sessions.end())
+                    recipients.push_back(*it);
+            }
+        }
+
+        if (recipients.empty())
+        {
+            SendConfirmation(sender, false, L"Адресат не найден.");
             return;
         }
 
-        auto it = std::find_if(g_sessions.begin(), g_sessions.end(), [&incoming](const std::shared_ptr<Session>& s)
-            {
-                return s->sessionID == incoming.header.to;
-            });
-
-        if (it != g_sessions.end())
-            (*it)->addMessage(incoming);
-    }
-
-    void SendConfirmation(tcp::socket& socket, int to, bool ok, const std::wstring& text, int auxId = 0)
-    {
-        MessagePaisev response(to, MT_CONFIRM, text, ok ? 1 : 0, auxId);
-        SendMessage(socket, response);
-    }
-
-    void HandleClient(std::shared_ptr<tcp::socket> socket)
-    {
+        std::wstring text = L"Клиент " + std::to_wstring(sender->sessionID) + L": " + incoming.data;
+        for (const auto& recipient : recipients)
         {
-            std::lock_guard<std::mutex> lock(g_sessionsMutex);
-            SendConfirmation(*socket, TARGET_MAIN_THREAD, true, BuildActiveIdsCsv(), ActiveWorkersCount());
+            MessagePaisev outgoing(recipient->sessionID, MT_SEND_TEXT, text, 1, sender->sessionID);
+            SendToClient(recipient, outgoing);
         }
 
-        while (g_running.load())
+        SendConfirmation(sender, true, L"Сообщение доставлено.");
+    }
+
+    void HandleClient(std::shared_ptr<ClientSession> session)
+    {
+        Log(L"[client " + std::to_wstring(session->sessionID) + L"] connected");
+        BroadcastClientList();
+
+        while (g_running.load() && session->connected.load())
         {
             MessagePaisev incoming;
-            if (!ReceiveMessage(*socket, incoming))
+            try
+            {
+                SocketReceiver receiver(*session->socket);
+                incoming.receive(receiver);
+            }
+            catch (...)
+            {
                 break;
+            }
 
-            std::lock_guard<std::mutex> lock(g_sessionsMutex);
+            session->lastActivity = std::chrono::steady_clock::now();
 
             switch (incoming.header.messageType)
             {
-            case MT_CREATE_THREAD:
-            {
-                int id = CreateWorker();
-                SendConfirmation(*socket, incoming.header.to, true, L"Поток создан.", id);
-                break;
-            }
-            case MT_STOP_THREAD:
-            {
-                if (StopWorker(incoming.header.to))
-                    SendConfirmation(*socket, incoming.header.to, true, L"Поток остановлен.", incoming.header.to);
-                else
-                    SendConfirmation(*socket, incoming.header.to, false, L"Указанный поток не найден.");
-                break;
-            }
             case MT_SEND_TEXT:
             {
                 if (incoming.data.empty())
-                {
-                    SendConfirmation(*socket, incoming.header.to, false, L"Пустое сообщение не отправлено.");
-                    break;
-                }
-
-                if (incoming.header.to == TARGET_MAIN_THREAD)
-                {
-                    Log(L"[main] " + incoming.data);
-                    SendConfirmation(*socket, incoming.header.to, true, L"Сообщение выведено главным потоком.");
-                }
-                else if (incoming.header.to == TARGET_ALL_THREADS)
-                {
-                    RouteMessageToSessions(incoming);
-                    SendConfirmation(*socket, incoming.header.to, true, L"Сообщение отправлено всем рабочим потокам.");
-                }
+                    SendConfirmation(session, false, L"Пустое сообщение не отправлено.");
                 else
-                {
-                    auto it = std::find_if(g_sessions.begin(), g_sessions.end(), [&incoming](const std::shared_ptr<Session>& s)
-                        {
-                            return s->sessionID == incoming.header.to;
-                        });
-
-                    if (it == g_sessions.end())
-                        SendConfirmation(*socket, incoming.header.to, false, L"Поток-адресат не найден.");
-                    else
-                    {
-                        RouteMessageToSessions(incoming);
-                        SendConfirmation(*socket, incoming.header.to, true, L"Сообщение отправлено в указанный поток.");
-                    }
-                }
+                    RouteTextMessage(session, incoming);
+                break;
+            }
+            case MT_REFRESH_THREADS:
+            {
+                BroadcastClientList();
                 break;
             }
             case MT_DISCONNECT:
             {
-                SendConfirmation(*socket, incoming.header.to, true, L"Клиент отключен от сервера.");
-                return;
+                SendConfirmation(session, true, L"Клиент отключен от сервера.");
+                session->connected.store(false);
+                break;
             }
             case MT_SHUTDOWN:
             {
-                SendConfirmation(*socket, incoming.header.to, false, L"Остановка сервера удалённо запрещена.");
+                SendConfirmation(session, false, L"Остановка сервера удалённо запрещена.");
                 break;
             }
             default:
-                SendConfirmation(*socket, incoming.header.to, false, L"Неизвестная команда.");
+                SendConfirmation(session, false, L"Неизвестная команда.");
                 break;
             }
         }
+
+        RemoveClient(session->sessionID);
     }
 }
 
@@ -305,7 +341,7 @@ int wmain()
     SetConsoleOutputCP(CP_UTF8);
     std::locale::global(std::locale(""));
 
-    Log(L"[main] TCP server started on port 54000");
+    Log(L"[main] message server started on port 54000");
 
     try
     {
@@ -316,7 +352,16 @@ int wmain()
         {
             auto socket = std::make_shared<tcp::socket>(io);
             acceptor.accept(*socket);
-            std::thread(HandleClient, socket).detach();
+
+            std::shared_ptr<ClientSession> session;
+            {
+                std::lock_guard<std::mutex> lock(g_sessionsMutex);
+                session = std::make_shared<ClientSession>(AllocateClientIdLocked(), socket);
+                g_sessions.push_back(session);
+            }
+
+            session->thread = std::make_shared<std::thread>(HandleClient, session);
+            session->thread->detach();
         }
     }
     catch (const std::exception& ex)
@@ -325,6 +370,5 @@ int wmain()
         return 1;
     }
 
-    JoinAndCleanupThreads();
     return 0;
 }
