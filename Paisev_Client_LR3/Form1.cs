@@ -317,9 +317,6 @@ namespace Paisev_Client_LR3
                 DisconnectTransport();
                 return false;
             }
-
-            activeClientIds.Sort();
-            RebuildClientsCombo();
         }
 
         private void SendAll(byte[] data)
